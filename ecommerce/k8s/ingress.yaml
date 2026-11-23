@@ -2,8 +2,14 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: ecommerce
+  annotations:
+    # Plain HTTP is redirected to HTTPS so credentials and tokens never cross the network unencrypted.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
 spec:
   ingressClassName: nginx
+  tls:
+    # Until this Secret exists ingress-nginx serves its self-signed default certificate.
+    - secretName: ecommerce-tls
   rules:
     - http:
         paths:

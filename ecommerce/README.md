@@ -35,18 +35,19 @@ Every service serves its routes under its own path prefix (so the Ingress can ro
 
 ### Auth model
 
-- `users-service` issues HS256 JWTs (`sub`, `email`, `role`). All services share `JWT_SECRET` and validate tokens locally.
-- Registration always creates `customer` accounts. On startup users-service creates (or takes over) the bootstrap admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` (`admin@example.com` / `admin123` in Compose; password from the Secret in k8s). Admins manage products, promo codes, campaigns, complaint status and return decisions.
-- Service-only endpoints (inventory adjust, charge, refund, promo redeem) require the `X-Internal-Token` header (`INTERNAL_API_KEY`), so they can't be called by end users through the Ingress.
+- `users-service` issues HS256 JWTs (`sub`, `email`, `role`). All services share `JWT_SECRET` and validate tokens locally, so a token can't be revoked individually: after changing `ADMIN_PASSWORD` (or any suspected leak) also rotate `JWT_SECRET` to invalidate every issued token.
+- Login is throttled per email: after `LOGIN_MAX_FAILURES` failed attempts within `LOGIN_LOCKOUT_SECONDS` it returns `429` (counted per users-service replica).
+- Registration always creates `customer` accounts. On startup users-service creates (or takes over) the bootstrap admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` (`admin@example.com` / `admin123` in Compose, whose ports bind to localhost only; password from `k8s/secrets.env` in k8s). Admins manage products, promo codes, campaigns, complaint status and return decisions.
+- Service-only endpoints (inventory adjust/reserve/release, charge, void, refund, promo redeem/release) require the `X-Internal-Token` header (`INTERNAL_API_KEY`), so they can't be called by end users through the Ingress.
 
 ### Checkout flow (`POST /orders/checkout`)
 
 1. Load the cart (or explicit `items`) and fetch each product from **products-service** (price, category, stock).
 2. Fetch active campaigns from **promotions-service**; apply the best matching campaign per line (scope `catalog`, `category`, or `products`; `percent` or `fixed` per unit).
 3. If a `promo_code` is given, validate it with **promotions-service** against the post-campaign subtotal (active flag, expiry, usage limit, minimum amount; `percent` or `fixed`).
-4. Persist the order (`pending`), atomically reserve stock in **products-service** (rolled back on failure).
-5. Charge **payments-service** (mock: card numbers ending in `0000` are declined → order `failed`, stock released).
-6. Redeem the promo code (increments usage), mark the order `paid`, clear the cart.
+4. Persist the order (`pending`); for cart checkouts this happens in the same transaction that removes the cart items.
+5. Reserve stock in **products-service**, redeem the promo code in **promotions-service**, then charge **payments-service** (mock: card numbers ending in `0000` are declined → order `failed`). Each call carries an idempotency key derived from the order.
+6. Mark the order `paid`. On failure the order becomes `failed`, the cart is restored, and stock, promo use and any charge are released/voided by the same keys, so calls whose response was lost are undone too. Compensations that can't complete (and checkouts left `pending` for `STALE_PENDING_MINUTES`) are retried by a background loop every `RECONCILE_INTERVAL` seconds.
 
 ### Returns flow
 
@@ -60,7 +61,7 @@ ecommerce/
 ├── db/init.sql                 # creates the 6 databases (local dev)
 ├── k8s/                        # kustomize-ready manifests
 │   ├── kustomization.yaml
-│   ├── namespace.yaml, secret.yaml, configmap.yaml
+│   ├── namespace.yaml, secrets.env.example, configmap.yaml
 │   ├── postgres.yaml           # StatefulSet + Service + init-script ConfigMap
 │   ├── services/<name>.yaml    # Deployment (2 replicas) + ClusterIP Service
 │   └── ingress.yaml
@@ -100,19 +101,22 @@ done
 
 ## Deploy to Kubernetes
 
-The manifests reference `ecommerce/<name>-service:latest` with `imagePullPolicy: IfNotPresent`, so images loaded into the local cluster are used directly. For a real registry, push the images and set `images:` in `k8s/kustomization.yaml`. Change the values in `k8s/secret.yaml` before deploying anywhere real.
+The manifests reference `ecommerce/<name>-service:latest` with `imagePullPolicy: IfNotPresent`, so images loaded into the local cluster are used directly. For a real registry, push the images and set `images:` in `k8s/kustomization.yaml`. Secrets are not committed: create `k8s/secrets.env` from `k8s/secrets.env.example` with your own values before `kubectl apply -k` (kustomize fails without it).
+
+The Ingress only serves HTTPS (HTTP is redirected). Install a certificate as the `ecommerce-tls` Secret (`kubectl -n ecommerce create secret tls ecommerce-tls --cert=tls.crt --key=tls.key`); until then ingress-nginx uses its self-signed default certificate and the `curl` examples need `-k`.
 
 ### minikube
 
 ```bash
 minikube start
 minikube addons enable ingress
+cp ecommerce/k8s/secrets.env.example ecommerce/k8s/secrets.env   # then fill in every value
 for s in users products orders payments promotions support; do
   minikube image load ecommerce/$s-service:latest
 done
 kubectl apply -k ecommerce/k8s
 kubectl -n ecommerce get pods -w
-export BASE=http://$(minikube ip)
+export BASE=https://$(minikube ip)
 ```
 
 ### kind
@@ -128,7 +132,10 @@ nodes:
     extraPortMappings:
       - containerPort: 80
         hostPort: 8080
+      - containerPort: 443
+        hostPort: 8443
 KIND
+cp ecommerce/k8s/secrets.env.example ecommerce/k8s/secrets.env   # then fill in every value
 kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml
 kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=180s
 for s in users products orders payments promotions support; do
@@ -136,7 +143,7 @@ for s in users products orders payments promotions support; do
 done
 kubectl apply -k ecommerce/k8s
 kubectl -n ecommerce wait --for=condition=available deploy --all --timeout=300s
-export BASE=http://localhost:8080
+export BASE=https://localhost:8443
 ```
 
 ## Example API calls
@@ -159,7 +166,7 @@ The examples use `jq` to capture tokens and IDs.
 curl -s -X POST $USERS/users/register -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"alice123","full_name":"Alice"}'
 
-# Bootstrap admin (ADMIN_EMAIL / ADMIN_PASSWORD). On k8s use the ADMIN_PASSWORD from k8s/secret.yaml.
+# Bootstrap admin (ADMIN_EMAIL / ADMIN_PASSWORD). On k8s use the ADMIN_PASSWORD from k8s/secrets.env.
 ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
 ADMIN=$(curl -s -X POST $USERS/users/login -H 'Content-Type: application/json' \
   -d "{\"email\":\"admin@example.com\",\"password\":\"$ADMIN_PASSWORD\"}" | jq -r .access_token)
@@ -230,7 +237,7 @@ ORDER_ID=$(echo "$ORDER" | jq -r .id)
 curl -s $PAYMENTS/payments?order_id=$ORDER_ID -H "Authorization: Bearer $ALICE"
 ```
 
-Use a card ending in `0000` to simulate a decline (HTTP 402, order `failed`, stock released).
+Use a card ending in `0000` to simulate a decline (HTTP 402, order `failed`, stock and promo released, cart restored).
 
 ### File a complaint
 
@@ -268,14 +275,16 @@ curl -s $PAYMENTS/payments?order_id=$ORDER_ID -H "Authorization: Bearer $ALICE" 
 |---|---|---|
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | all | Postgres connection (or set `DATABASE_URL`) |
 | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES` | all / users | JWT signing & validation |
+| `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | users | Failed-login throttling (default 5 per 900 s) |
 | `INTERNAL_API_KEY` | all | Shared key for service-to-service endpoints |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | users | Bootstrap admin account seeded at startup |
 | `PRODUCTS_SERVICE_URL`, `PROMOTIONS_SERVICE_URL`, `PAYMENTS_SERVICE_URL` | orders | Downstream URLs |
 | `ORDERS_SERVICE_URL`, `PAYMENTS_SERVICE_URL` | support | Downstream URLs |
 | `HTTP_TIMEOUT` | orders, support | Downstream call timeout in seconds (default 5) |
+| `RECONCILE_INTERVAL`, `STALE_PENDING_MINUTES` | orders | Failed-checkout compensation retry interval (default 30 s) and age after which a `pending` order counts as interrupted (default 15) |
 
 ## Limitations (by design, to keep it minimal)
 
 - Payments are mocked; no external gateway. No message queue: all calls are synchronous, and checkout uses compensating actions (stock release) instead of distributed transactions.
-- Tables are created with `metadata.create_all` at startup; use Alembic for real schema migrations.
+- Tables are created with `metadata.create_all` at startup; columns added to existing tables are applied by idempotent `ALTER TABLE ... IF NOT EXISTS` statements (`MIGRATIONS` in each service's `database.py`). Use Alembic for anything more involved.
 - Single Postgres instance for all six databases.

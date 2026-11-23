@@ -5,7 +5,6 @@ namespace: ecommerce
 
 resources:
   - namespace.yaml
-  - secret.yaml
   - configmap.yaml
   - postgres.yaml
   - services/users.yaml
@@ -15,6 +14,12 @@ resources:
   - services/promotions.yaml
   - services/support.yaml
   - ingress.yaml
+
+# Secrets are read from the git-ignored secrets.env (see secrets.env.example), so no credentials are committed.
+secretGenerator:
+  - name: ecommerce-secrets
+    envs:
+      - secrets.env
 
 # Override image names/tags here, e.g. when pushing to a registry:
 # images:

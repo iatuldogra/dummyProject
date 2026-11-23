@@ -1,5 +1,5 @@
 # Local development: all six services + a single Postgres.
-# Services are reachable on localhost:8001..8006 (see README).
+# Services are reachable on localhost:8001..8006 only (see README); the credentials below are dev-only.
 x-service-env: &service-env
   DB_HOST: postgres
   DB_PORT: "5432"
@@ -40,7 +40,7 @@ services:
       <<: *service-env
       DB_NAME: users_db
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,7 +52,7 @@ services:
       <<: *service-env
       DB_NAME: products_db
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,7 +64,7 @@ services:
       <<: *service-env
       DB_NAME: orders_db
     ports:
-      - "8003:8000"
+      - "127.0.0.1:8003:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
       <<: *service-env
       DB_NAME: payments_db
     ports:
-      - "8004:8000"
+      - "127.0.0.1:8004:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,7 +88,7 @@ services:
       <<: *service-env
       DB_NAME: promotions_db
     ports:
-      - "8005:8000"
+      - "127.0.0.1:8005:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,7 +100,7 @@ services:
       <<: *service-env
       DB_NAME: support_db
     ports:
-      - "8006:8000"
+      - "127.0.0.1:8006:8000"
     depends_on:
       postgres:
         condition: service_healthy
