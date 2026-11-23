@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ecommerce
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - postgres.yaml
+  - services/users.yaml
+  - services/products.yaml
+  - services/orders.yaml
+  - services/payments.yaml
+  - services/promotions.yaml
+  - services/support.yaml
+  - ingress.yaml
+
+# Secrets are read from the git-ignored secrets.env (see secrets.env.example), so no credentials are committed.
+secretGenerator:
+  - name: ecommerce-secrets
+    envs:
+      - secrets.env
+
+# Override image names/tags here, e.g. when pushing to a registry:
+# images:
+#   - name: ecommerce/users-service
+#     newName: registry.example.com/ecommerce/users-service
+#     newTag: "1.0.0"
