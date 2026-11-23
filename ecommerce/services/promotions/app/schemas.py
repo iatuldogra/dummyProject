@@ -93,6 +93,7 @@ class PromoValidateResponse(BaseModel):
 
 class PromoRedeemRequest(BaseModel):
     code: str
+    key: str = Field(min_length=1, max_length=100, description="Retries with the same key redeem only once")
 
 
 # ---------- Campaigns ----------

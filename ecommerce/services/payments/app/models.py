@@ -17,11 +17,13 @@ class Payment(Base):
     amount: Mapped[float] = mapped_column(Money)
     refunded_amount: Mapped[float] = mapped_column(Money, default=0)
     currency: Mapped[str] = mapped_column(String(3), default="USD")
-    # succeeded | failed | partially_refunded | refunded
+    # succeeded | failed | partially_refunded | refunded | voided
     status: Mapped[str] = mapped_column(String(20))
     card_last4: Mapped[str | None] = mapped_column(String(4))
     transaction_ref: Mapped[str] = mapped_column(String(64), unique=True)
     failure_reason: Mapped[str | None] = mapped_column(String(255))
+    # Retries with the same key return this payment; voiding an unknown key stores a voided placeholder.
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     refunds: Mapped[list["Refund"]] = relationship(back_populates="payment", order_by="Refund.id")

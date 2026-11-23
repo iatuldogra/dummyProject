@@ -11,6 +11,15 @@ class PaymentCreate(BaseModel):
     card_number: str | None = Field(
         default="4242424242424242", description="Mock card; numbers ending in 0000 are declined"
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=100, description="Retries with the same key return the original payment"
+    )
+
+
+class PaymentVoid(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=100)
+    order_id: int
+    user_id: int
 
 
 class PaymentOut(BaseModel):

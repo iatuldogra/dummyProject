@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -107,3 +108,64 @@ def adjust_inventory(product_id: int, payload: schemas.InventoryAdjust, db: Sess
         raise HTTPException(status.HTTP_409_CONFLICT, "Insufficient stock")
     db.commit()
     return schemas.InventoryOut(product_id=product_id, stock=new_stock)
+
+
+@app.post(
+    "/products/{product_id}/inventory/reserve",
+    response_model=schemas.InventoryOut,
+    dependencies=[Depends(require_internal)],
+)
+def reserve_inventory(product_id: int, payload: schemas.InventoryReserve, db: Session = Depends(get_db)):
+    """Atomically take stock under an idempotency key; used by orders-service at checkout."""
+    Reservation = models.InventoryReservation
+    product = _get_product(db, product_id)
+    created = db.execute(
+        insert(Reservation)
+        .values(key=payload.key, product_id=product_id, quantity=payload.quantity)
+        .on_conflict_do_nothing(index_elements=[Reservation.key])
+        .returning(Reservation.id)
+    ).scalar_one_or_none()
+    if created is None:
+        existing = db.scalar(select(Reservation).where(Reservation.key == payload.key))
+        db.rollback()
+        if existing.cancelled or existing.product_id != product_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Reservation was released or belongs to another product")
+        return schemas.InventoryOut(product_id=product_id, stock=product.stock)
+    new_stock = db.execute(
+        update(models.Product)
+        .where(models.Product.id == product_id, models.Product.stock >= payload.quantity)
+        .values(stock=models.Product.stock - payload.quantity)
+        .returning(models.Product.stock)
+    ).scalar_one_or_none()
+    if new_stock is None:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Insufficient stock")
+    db.commit()
+    return schemas.InventoryOut(product_id=product_id, stock=new_stock)
+
+
+@app.post(
+    "/products/{product_id}/inventory/release",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_internal)],
+)
+def release_inventory(product_id: int, payload: schemas.InventoryRelease, db: Session = Depends(get_db)):
+    """Return a reservation's stock; safe to repeat and to call for a reservation that never arrived."""
+    Reservation = models.InventoryReservation
+    tombstone = db.execute(
+        insert(Reservation)
+        .values(key=payload.key, product_id=product_id, quantity=0, cancelled=True)
+        .on_conflict_do_nothing(index_elements=[Reservation.key])
+        .returning(Reservation.id)
+    ).scalar_one_or_none()
+    if tombstone is None:
+        reservation = db.scalar(select(Reservation).where(Reservation.key == payload.key).with_for_update())
+        if not reservation.cancelled:
+            reservation.cancelled = True
+            db.execute(
+                update(models.Product)
+                .where(models.Product.id == reservation.product_id)
+                .values(stock=models.Product.stock + reservation.quantity)
+            )
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

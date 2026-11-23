@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -22,6 +24,20 @@ logger = logging.getLogger("users")
 
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+LOGIN_MAX_FAILURES = int(os.getenv("LOGIN_MAX_FAILURES", "5"))
+LOGIN_LOCKOUT_SECONDS = float(os.getenv("LOGIN_LOCKOUT_SECONDS", "900"))
+
+_login_failures: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+
+
+def _recent_failures(email: str, now: float) -> list[float]:
+    failures = [t for t in _login_failures.get(email, []) if now - t < LOGIN_LOCKOUT_SECONDS]
+    if failures:
+        _login_failures[email] = failures
+    else:
+        _login_failures.pop(email, None)
+    return failures
 
 
 def seed_admin() -> None:
@@ -79,9 +95,18 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/users/login", response_model=schemas.Token)
 def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
-    user = db.scalar(select(models.User).where(models.User.email == payload.email.lower()))
+    email = payload.email.lower()
+    with _login_lock:
+        if len(_recent_failures(email, time.monotonic())) >= LOGIN_MAX_FAILURES:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed logins, try again later")
+    user = db.scalar(select(models.User).where(models.User.email == email))
     if not user or not verify_password(payload.password, user.password_hash):
+        with _login_lock:
+            now = time.monotonic()
+            _login_failures[email] = _recent_failures(email, now) + [now]
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    with _login_lock:
+        _login_failures.pop(email, None)
     return schemas.Token(access_token=create_access_token(user.id, user.email, user.role))
 
 

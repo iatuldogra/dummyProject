@@ -41,3 +41,12 @@ class InventorySet(BaseModel):
 
 class InventoryAdjust(BaseModel):
     delta: int = Field(description="Negative to reserve/reduce stock, positive to restock")
+
+
+class InventoryReserve(BaseModel):
+    key: str = Field(min_length=1, max_length=100, description="Retries with the same key reserve only once")
+    quantity: int = Field(gt=0)
+
+
+class InventoryRelease(BaseModel):
+    key: str = Field(min_length=1, max_length=100)

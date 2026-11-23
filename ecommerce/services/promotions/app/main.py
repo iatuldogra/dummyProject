@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -110,12 +111,25 @@ def validate_promo_code(payload: schemas.PromoValidateRequest, db: Session = Dep
 
 @app.post("/promotions/promo-codes/redeem", response_model=schemas.PromoCodeOut, dependencies=[Depends(require_internal)])
 def redeem_promo_code(payload: schemas.PromoRedeemRequest, db: Session = Depends(get_db)):
-    """Atomically increment usage; called by orders-service after a successful checkout."""
-    PromoCode = models.PromoCode
+    """Atomically consume one use under an idempotency key; called by orders-service at checkout."""
+    PromoCode, Redemption = models.PromoCode, models.PromoRedemption
+    code = payload.code.strip().upper()
+    created = db.execute(
+        insert(Redemption)
+        .values(key=payload.key, code=code)
+        .on_conflict_do_nothing(index_elements=[Redemption.key])
+        .returning(Redemption.id)
+    ).scalar_one_or_none()
+    if created is None:
+        existing = db.scalar(select(Redemption).where(Redemption.key == payload.key))
+        db.rollback()
+        if existing.cancelled or existing.code != code:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Redemption was released or belongs to another code")
+        return db.scalar(select(PromoCode).where(PromoCode.code == code))
     promo_id = db.execute(
         update(PromoCode)
         .where(
-            PromoCode.code == payload.code.strip().upper(),
+            PromoCode.code == code,
             PromoCode.is_active.is_(True),
             or_(PromoCode.usage_limit.is_(None), PromoCode.times_used < PromoCode.usage_limit),
         )
@@ -131,13 +145,23 @@ def redeem_promo_code(payload: schemas.PromoRedeemRequest, db: Session = Depends
 
 @app.post("/promotions/promo-codes/release", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_internal)])
 def release_promo_code(payload: schemas.PromoRedeemRequest, db: Session = Depends(get_db)):
-    """Give back one use; called by orders-service when a checkout fails after redeeming."""
-    PromoCode = models.PromoCode
-    db.execute(
-        update(PromoCode)
-        .where(PromoCode.code == payload.code.strip().upper(), PromoCode.times_used > 0)
-        .values(times_used=PromoCode.times_used - 1)
-    )
+    """Give back a redemption's use; safe to repeat and to call for a redemption that never arrived."""
+    PromoCode, Redemption = models.PromoCode, models.PromoRedemption
+    tombstone = db.execute(
+        insert(Redemption)
+        .values(key=payload.key, code=payload.code.strip().upper(), cancelled=True)
+        .on_conflict_do_nothing(index_elements=[Redemption.key])
+        .returning(Redemption.id)
+    ).scalar_one_or_none()
+    if tombstone is None:
+        redemption = db.scalar(select(Redemption).where(Redemption.key == payload.key).with_for_update())
+        if not redemption.cancelled:
+            redemption.cancelled = True
+            db.execute(
+                update(PromoCode)
+                .where(PromoCode.code == redemption.code, PromoCode.times_used > 0)
+                .values(times_used=PromoCode.times_used - 1)
+            )
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

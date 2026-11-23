@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -30,6 +30,10 @@ class Order(Base):
     promo_code: Mapped[str | None] = mapped_column(String(50))
     payment_id: Mapped[int | None] = mapped_column(Integer)
     failure_reason: Mapped[str | None] = mapped_column(String(255))
+    from_cart: Mapped[bool] = mapped_column(Boolean, default=False)  # items go back to the cart if interrupted
+    payment_attempted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Failed order whose stock / promo / payment still has to be given back (retried in the background).
+    needs_compensation: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     items: Mapped[list["OrderItem"]] = relationship(

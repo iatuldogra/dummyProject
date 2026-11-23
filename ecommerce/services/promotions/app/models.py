@@ -41,3 +41,18 @@ class Campaign(Base):
     product_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PromoRedemption(Base):
+    """One keyed use of a promo code, so retries and releases are idempotent.
+
+    Releasing an unknown key stores a cancelled row, so a redemption arriving late can't apply.
+    """
+
+    __tablename__ = "promo_redemptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(100), unique=True)
+    code: Mapped[str] = mapped_column(String(50), index=True)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

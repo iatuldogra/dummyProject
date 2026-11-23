@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -26,6 +28,10 @@ def _get_visible_payment(db: Session, payment_id: int, user: CurrentUser) -> mod
     return payment
 
 
+def _payment_by_key(db: Session, key: str) -> models.Payment | None:
+    return db.scalar(select(models.Payment).where(models.Payment.idempotency_key == key))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "payments"}
@@ -39,6 +45,8 @@ def health():
 )
 def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)):
     """Mock charge. Always records the attempt; cards ending in 0000 are declined."""
+    if payload.idempotency_key and (existing := _payment_by_key(db, payload.idempotency_key)):
+        return existing
     card = (payload.card_number or "").replace(" ", "")
     declined = card.endswith("0000")
     payment = models.Payment(
@@ -51,8 +59,40 @@ def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)
         card_last4=card[-4:] or None,
         transaction_ref=f"mock_{uuid.uuid4().hex}",
         failure_reason="Card declined" if declined else None,
+        idempotency_key=payload.idempotency_key,
     )
     db.add(payment)
+    try:
+        db.commit()
+    except IntegrityError:  # concurrent request with the same key won
+        db.rollback()
+        return _payment_by_key(db, payload.idempotency_key)
+    db.refresh(payment)
+    return payment
+
+
+@app.post("/payments/void", response_model=schemas.PaymentOut, dependencies=[Depends(require_internal)])
+def void_payment(payload: schemas.PaymentVoid, db: Session = Depends(get_db)):
+    """Cancel the charge made under a key; safe to repeat and to call for a charge that never arrived."""
+    Payment = models.Payment
+    db.execute(
+        insert(Payment)
+        .values(
+            order_id=payload.order_id,
+            user_id=payload.user_id,
+            amount=0,
+            refunded_amount=0,
+            currency="USD",
+            status="voided",
+            transaction_ref=f"mock_{uuid.uuid4().hex}",
+            failure_reason="Voided before charge",
+            idempotency_key=payload.idempotency_key,
+        )
+        .on_conflict_do_nothing(index_elements=[Payment.idempotency_key])
+    )
+    payment = db.scalar(select(Payment).where(Payment.idempotency_key == payload.idempotency_key).with_for_update())
+    if payment.status == "succeeded":
+        payment.status, payment.failure_reason = "voided", "Voided: checkout failed"
     db.commit()
     db.refresh(payment)
     return payment
