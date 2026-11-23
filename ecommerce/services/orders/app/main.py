@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -182,13 +183,7 @@ def get_cart(user: CurrentUser = Depends(get_current_user), db: Session = Depend
 @app.post("/orders/cart/items", response_model=schemas.CartOut, status_code=status.HTTP_201_CREATED)
 def add_to_cart(line: schemas.CartLine, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     fetch_product(line.product_id)
-    item = db.scalar(
-        select(models.CartItem).where(models.CartItem.user_id == user.id, models.CartItem.product_id == line.product_id)
-    )
-    if item:
-        item.quantity += line.quantity
-    else:
-        db.add(models.CartItem(user_id=user.id, product_id=line.product_id, quantity=line.quantity))
+    _add_cart_quantity(db, user.id, line.product_id, line.quantity)
     db.commit()
     return get_cart(user, db)
 
@@ -209,16 +204,21 @@ def clear_cart(user: CurrentUser = Depends(get_current_user), db: Session = Depe
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _add_cart_quantity(db: Session, user_id: int, product_id: int, quantity: int) -> None:
+    """Atomic upsert so concurrent cart writes add up instead of colliding."""
+    stmt = insert(models.CartItem).values(user_id=user_id, product_id=product_id, quantity=quantity)
+    db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[models.CartItem.user_id, models.CartItem.product_id],
+            set_={"quantity": models.CartItem.quantity + stmt.excluded.quantity},
+        )
+    )
+
+
 def _restore_cart(db: Session, user_id: int, lines: dict[int, int]) -> None:
     db.rollback()
     for product_id, quantity in lines.items():
-        item = db.scalar(
-            select(models.CartItem).where(models.CartItem.user_id == user_id, models.CartItem.product_id == product_id)
-        )
-        if item:
-            item.quantity += quantity
-        else:
-            db.add(models.CartItem(user_id=user_id, product_id=product_id, quantity=quantity))
+        _add_cart_quantity(db, user_id, product_id, quantity)
     db.commit()
 
 
