@@ -46,11 +46,11 @@ def fetch_order(order_id: int, user: CurrentUser) -> dict:
     return resp.json()
 
 
-def request_refund(payment_id: int, amount: float, reason: str) -> dict:
+def request_refund(payment_id: int, amount: float, reason: str, idempotency_key: str) -> dict:
     resp = _call(
         "POST",
         f"{PAYMENTS_URL}/payments/refunds",
-        json={"payment_id": payment_id, "amount": amount, "reason": reason},
+        json={"payment_id": payment_id, "amount": amount, "reason": reason, "idempotency_key": idempotency_key},
         headers={"X-Internal-Token": INTERNAL_API_KEY},
     )
     if resp.is_error:
@@ -146,24 +146,37 @@ def create_return(
         for item in r.items:
             already_returned[item["product_id"]] = already_returned.get(item["product_id"], 0) + item["quantity"]
 
+    requested: dict[int, int] = {}
+    for item in payload.items:
+        requested[item.product_id] = requested.get(item.product_id, 0) + item.quantity
+
     # Refund is proportional to what was actually paid (i.e. after campaign + promo discounts).
     paid_ratio = order["total"] / order["subtotal"] if order["subtotal"] else 0
     refund_amount = 0.0
-    for item in payload.items:
-        line = purchased.get(item.product_id)
+    for product_id, quantity in requested.items():
+        line = purchased.get(product_id)
         if not line:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Product {item.product_id} is not part of order")
-        if item.quantity + already_returned.get(item.product_id, 0) > line["quantity"]:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Return quantity exceeds purchased for {item.product_id}")
-        refund_amount += line["unit_price"] * item.quantity * paid_ratio
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Product {product_id} is not part of order")
+        if quantity + already_returned.get(product_id, 0) > line["quantity"]:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Return quantity exceeds purchased for {product_id}")
+        refund_amount += line["unit_price"] * quantity * paid_ratio
+
+    # Avoid per-return rounding drift: never exceed what's left, and refund the exact remainder
+    # once everything in the order has been returned.
+    already_refundable = round(sum(r.refund_amount for r in previous), 2)
+    remaining = round(order["total"] - already_refundable, 2)
+    fully_returned = all(
+        already_returned.get(pid, 0) + requested.get(pid, 0) >= line["quantity"] for pid, line in purchased.items()
+    )
+    refund_amount = remaining if fully_returned else min(round(refund_amount, 2), remaining)
 
     ret = models.ReturnRequest(
         user_id=user.id,
         order_id=payload.order_id,
-        items=[i.model_dump() for i in payload.items],
+        items=[{"product_id": pid, "quantity": qty} for pid, qty in requested.items()],
         reason=payload.reason,
         status="requested",
-        refund_amount=round(refund_amount, 2),
+        refund_amount=max(refund_amount, 0.0),
         payment_id=order.get("payment_id"),
     )
     db.add(ret)
@@ -204,7 +217,12 @@ def decide_return(return_id: int, payload: schemas.ReturnDecision, db: Session =
     ret.status = "approved"
     db.commit()
     if ret.payment_id and ret.refund_amount > 0:
-        refund = request_refund(ret.payment_id, ret.refund_amount, f"Return #{ret.id}: {ret.reason}")
+        refund = request_refund(
+            ret.payment_id,
+            ret.refund_amount,
+            f"Return #{ret.id}: {ret.reason}"[:500],
+            idempotency_key=f"return-{ret.id}",
+        )
         ret.refund_id = refund["id"]
     ret.status = "refunded"
     db.commit()

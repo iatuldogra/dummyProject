@@ -68,6 +68,10 @@ def create_refund(payload: schemas.RefundCreate, db: Session = Depends(get_db)):
     payment = db.scalar(select(models.Payment).where(models.Payment.id == payload.payment_id).with_for_update())
     if not payment:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    if payload.idempotency_key:
+        existing = db.scalar(select(models.Refund).where(models.Refund.idempotency_key == payload.idempotency_key))
+        if existing:
+            return existing
     if payment.status not in ("succeeded", "partially_refunded"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Cannot refund a payment with status '{payment.status}'")
     amount = round(payload.amount, 2)
@@ -75,7 +79,13 @@ def create_refund(payload: schemas.RefundCreate, db: Session = Depends(get_db)):
     if amount > refundable:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Refund exceeds refundable amount ({refundable})")
 
-    refund = models.Refund(payment_id=payment.id, amount=amount, reason=payload.reason, status="succeeded")
+    refund = models.Refund(
+        payment_id=payment.id,
+        amount=amount,
+        reason=payload.reason,
+        idempotency_key=payload.idempotency_key,
+        status="succeeded",
+    )
     payment.refunded_amount = round(payment.refunded_amount + amount, 2)
     payment.status = "refunded" if payment.refunded_amount >= payment.amount else "partially_refunded"
     db.add(refund)

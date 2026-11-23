@@ -34,6 +34,7 @@ class Refund(Base):
     payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"), index=True)
     amount: Mapped[float] = mapped_column(Money)
     reason: Mapped[str | None] = mapped_column(String(500))
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
     status: Mapped[str] = mapped_column(String(20), default="succeeded")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -33,6 +33,9 @@ class RefundCreate(BaseModel):
     payment_id: int
     amount: float = Field(gt=0)
     reason: str | None = Field(default=None, max_length=500)
+    idempotency_key: str | None = Field(
+        default=None, max_length=100, description="Retries with the same key return the original refund"
+    )
 
 
 class RefundOut(BaseModel):
