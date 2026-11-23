@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ecommerce
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /users
+            pathType: Prefix
+            backend:
+              service:
+                name: users-service
+                port:
+                  name: http
+          - path: /products
+            pathType: Prefix
+            backend:
+              service:
+                name: products-service
+                port:
+                  name: http
+          - path: /orders
+            pathType: Prefix
+            backend:
+              service:
+                name: orders-service
+                port:
+                  name: http
+          - path: /payments
+            pathType: Prefix
+            backend:
+              service:
+                name: payments-service
+                port:
+                  name: http
+          - path: /promotions
+            pathType: Prefix
+            backend:
+              service:
+                name: promotions-service
+                port:
+                  name: http
+          - path: /support
+            pathType: Prefix
+            backend:
+              service:
+                name: support-service
+                port:
+                  name: http

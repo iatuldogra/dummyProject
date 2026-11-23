@@ -1,0 +1,108 @@
+# Local development: all six services + a single Postgres.
+# Services are reachable on localhost:8001..8006 (see README).
+x-service-env: &service-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  JWT_SECRET: dev-jwt-secret
+  INTERNAL_API_KEY: dev-internal-key
+  ADMIN_EMAILS: admin@example.com
+  USERS_SERVICE_URL: http://users-service:8000
+  PRODUCTS_SERVICE_URL: http://products-service:8000
+  ORDERS_SERVICE_URL: http://orders-service:8000
+  PAYMENTS_SERVICE_URL: http://payments-service:8000
+  PROMOTIONS_SERVICE_URL: http://promotions-service:8000
+  SUPPORT_SERVICE_URL: http://support-service:8000
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  users-service:
+    build: ./services/users
+    image: ecommerce/users-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: users_db
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  products-service:
+    build: ./services/products
+    image: ecommerce/products-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: products_db
+    ports:
+      - "8002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  orders-service:
+    build: ./services/orders
+    image: ecommerce/orders-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: orders_db
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  payments-service:
+    build: ./services/payments
+    image: ecommerce/payments-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: payments_db
+    ports:
+      - "8004:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  promotions-service:
+    build: ./services/promotions
+    image: ecommerce/promotions-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: promotions_db
+    ports:
+      - "8005:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  support-service:
+    build: ./services/support
+    image: ecommerce/support-service:latest
+    environment:
+      <<: *service-env
+      DB_NAME: support_db
+    ports:
+      - "8006:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
