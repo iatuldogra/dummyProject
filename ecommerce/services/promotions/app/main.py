@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +39,7 @@ def _apply_update(obj, changes: dict, create_schema) -> None:
     try:
         validated = create_schema.model_validate(merged)
     except ValidationError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.errors(include_url=False, include_context=False))
+        raise RequestValidationError(exc.errors(include_url=False, include_context=False, include_input=False))
     for field in changes:
         setattr(obj, field, getattr(validated, field))
 
