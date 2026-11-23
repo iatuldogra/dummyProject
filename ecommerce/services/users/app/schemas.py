@@ -1,12 +1,19 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6, max_length=72)
+    password: str = Field(min_length=6)
     full_name: str | None = None
+
+    @field_validator("password")
+    @classmethod
+    def fits_bcrypt(cls, v: str) -> str:
+        if len(v.encode()) > 72:
+            raise ValueError("password must be at most 72 bytes (bcrypt limit)")
+        return v
 
 
 class LoginRequest(BaseModel):
