@@ -129,6 +129,19 @@ def redeem_promo_code(payload: schemas.PromoRedeemRequest, db: Session = Depends
     return db.get(PromoCode, promo_id)
 
 
+@app.post("/promotions/promo-codes/release", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_internal)])
+def release_promo_code(payload: schemas.PromoRedeemRequest, db: Session = Depends(get_db)):
+    """Give back one use; called by orders-service when a checkout fails after redeeming."""
+    PromoCode = models.PromoCode
+    db.execute(
+        update(PromoCode)
+        .where(PromoCode.code == payload.code.strip().upper(), PromoCode.times_used > 0)
+        .values(times_used=PromoCode.times_used - 1)
+    )
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get(
     "/promotions/promo-codes/{promo_id}",
     response_model=schemas.PromoCodeOut,

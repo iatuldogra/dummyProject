@@ -82,13 +82,23 @@ def validate_promo(code: str, subtotal: float) -> dict:
     return resp.json()
 
 
-def redeem_promo(code: str) -> None:
+def redeem_promo(code: str) -> bool:
+    """Consume one use of the promo code; False if it was used up concurrently."""
+    resp = _call("POST", f"{PROMOTIONS_URL}/promotions/promo-codes/redeem", json={"code": code}, headers=INTERNAL_HEADERS)
+    if resp.status_code == 409:
+        return False
+    if resp.is_error:
+        raise _upstream_error(resp)
+    return True
+
+
+def release_promo(code: str) -> None:
     try:
-        resp = _call("POST", f"{PROMOTIONS_URL}/promotions/promo-codes/redeem", json={"code": code}, headers=INTERNAL_HEADERS)
+        resp = _call("POST", f"{PROMOTIONS_URL}/promotions/promo-codes/release", json={"code": code}, headers=INTERNAL_HEADERS)
         if resp.is_error:
-            logger.warning("Promo redeem for %s failed: %s", code, resp.text)
+            logger.error("Failed to release promo %s: %s", code, resp.text)
     except HTTPException:
-        logger.warning("Promo redeem for %s failed: promotions-service unavailable", code)
+        logger.error("Failed to release promo %s: promotions-service unavailable", code)
 
 
 def charge(order: models.Order, card_number: str | None) -> dict:
@@ -199,21 +209,52 @@ def clear_cart(user: CurrentUser = Depends(get_current_user), db: Session = Depe
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _restore_cart(db: Session, user_id: int, lines: dict[int, int]) -> None:
+    db.rollback()
+    for product_id, quantity in lines.items():
+        item = db.scalar(
+            select(models.CartItem).where(models.CartItem.user_id == user_id, models.CartItem.product_id == product_id)
+        )
+        if item:
+            item.quantity += quantity
+        else:
+            db.add(models.CartItem(user_id=user_id, product_id=product_id, quantity=quantity))
+    db.commit()
+
+
 @app.post("/orders/checkout", response_model=schemas.OrderOut, status_code=status.HTTP_201_CREATED)
 def checkout(
     payload: schemas.CheckoutRequest,
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from_cart = payload.items is None
-    if from_cart:
-        cart = db.scalars(select(models.CartItem).where(models.CartItem.user_id == user.id)).all()
-        lines = _merge_lines([schemas.CartLine(product_id=c.product_id, quantity=c.quantity) for c in cart])
-    else:
+    if payload.items is not None:
         lines = _merge_lines(payload.items)
+        if not lines:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "No items to check out")
+        return _place_order(db, user, lines, payload)
+
+    # Claim the cart atomically so concurrent checkouts can't buy the same cart twice and items
+    # added meanwhile stay in the cart. The claimed items are put back if checkout fails.
+    claimed = db.execute(
+        delete(models.CartItem)
+        .where(models.CartItem.user_id == user.id)
+        .returning(models.CartItem.product_id, models.CartItem.quantity)
+    ).all()
+    db.commit()
+    lines = _merge_lines([schemas.CartLine(product_id=pid, quantity=qty) for pid, qty in claimed])
     if not lines:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cart is empty")
+    try:
+        return _place_order(db, user, lines, payload)
+    except Exception:
+        _restore_cart(db, user.id, lines)
+        raise
 
+
+def _place_order(
+    db: Session, user: CurrentUser, lines: dict[int, int], payload: schemas.CheckoutRequest
+) -> models.Order:
     # 1. Price items (products-service) and check stock.
     products = {pid: fetch_product(pid) for pid in lines}
     for pid, qty in lines.items():
@@ -255,37 +296,42 @@ def checkout(
     db.add(order)
     db.commit()
 
-    def fail(code: int, reason: str, reserved: dict[int, int]):
+    reserved: dict[int, int] = {}
+    promo_redeemed = False
+
+    def fail(code: int, reason: str):
         _release_stock(reserved)
+        if promo_redeemed:
+            release_promo(promo_code)
         order.status, order.failure_reason = "failed", reason
         db.commit()
         raise HTTPException(code, reason)
 
-    # 3. Reserve inventory (products-service).
-    reserved: dict[int, int] = {}
     try:
+        # 3. Reserve inventory (products-service).
         for pid, qty in lines.items():
             if not adjust_stock(pid, -qty):
-                fail(status.HTTP_409_CONFLICT, f"Insufficient stock for product {pid}", reserved)
+                fail(status.HTTP_409_CONFLICT, f"Insufficient stock for product {pid}")
             reserved[pid] = qty
 
-        # 4. Charge (payments-service).
+        # 4. Consume the promo code before charging so its usage limit can't be exceeded.
+        if promo_code:
+            if not redeem_promo(promo_code):
+                fail(status.HTTP_400_BAD_REQUEST, "Promo code usage limit reached")
+            promo_redeemed = True
+
+        # 5. Charge (payments-service).
         if order.total > 0:
             payment = charge(order, payload.card_number)
             order.payment_id = payment["id"]
             if payment["status"] != "succeeded":
-                fail(status.HTTP_402_PAYMENT_REQUIRED, payment.get("failure_reason") or "Payment failed", reserved)
+                fail(status.HTTP_402_PAYMENT_REQUIRED, payment.get("failure_reason") or "Payment failed")
     except HTTPException as exc:
         if order.status != "failed":
-            fail(exc.status_code, str(exc.detail), reserved)
+            fail(exc.status_code, str(exc.detail))
         raise
 
-    # 5. Finalize.
-    if promo_code:
-        redeem_promo(promo_code)
     order.status = "paid"
-    if from_cart:
-        db.execute(delete(models.CartItem).where(models.CartItem.user_id == user.id))
     db.commit()
     db.refresh(order)
     return order
