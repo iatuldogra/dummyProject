@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -15,14 +16,37 @@ from .auth import (
     require_admin,
     verify_password,
 )
-from .database import get_db, init_db
+from .database import SessionLocal, get_db, init_db
 
-ADMIN_EMAILS = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+logger = logging.getLogger("users")
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+
+
+def seed_admin() -> None:
+    """Create (or take over) the bootstrap admin account from ADMIN_EMAIL / ADMIN_PASSWORD."""
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD:
+        return
+    with SessionLocal() as db:
+        user = db.scalar(select(models.User).where(models.User.email == ADMIN_EMAIL))
+        if user is None:
+            user = models.User(email=ADMIN_EMAIL, full_name="Administrator")
+            db.add(user)
+        # Always reset the password so a pre-registered account with this email can't keep access.
+        user.password_hash = hash_password(ADMIN_PASSWORD)
+        user.role = "admin"
+        try:
+            db.commit()
+        except IntegrityError:  # another replica seeded it concurrently
+            db.rollback()
+            logger.info("Admin account already seeded by another replica")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    seed_admin()
     yield
 
 
@@ -41,7 +65,7 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
         email=email,
         full_name=payload.full_name,
         password_hash=hash_password(payload.password),
-        role="admin" if email in ADMIN_EMAILS else "customer",
+        role="customer",
     )
     db.add(user)
     try:

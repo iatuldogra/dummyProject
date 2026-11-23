@@ -36,7 +36,7 @@ Every service serves its routes under its own path prefix (so the Ingress can ro
 ### Auth model
 
 - `users-service` issues HS256 JWTs (`sub`, `email`, `role`). All services share `JWT_SECRET` and validate tokens locally.
-- Emails listed in `ADMIN_EMAILS` get the `admin` role at registration. Admins manage products, promo codes, campaigns, complaint status and return decisions.
+- Registration always creates `customer` accounts. On startup users-service creates (or takes over) the bootstrap admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` (`admin@example.com` / `admin123` in Compose; password from the Secret in k8s). Admins manage products, promo codes, campaigns, complaint status and return decisions.
 - Service-only endpoints (inventory adjust, charge, refund, promo redeem) require the `X-Internal-Token` header (`INTERNAL_API_KEY`), so they can't be called by end users through the Ingress.
 
 ### Checkout flow (`POST /orders/checkout`)
@@ -156,14 +156,13 @@ The examples use `jq` to capture tokens and IDs.
 ### Register / login
 
 ```bash
-# admin@example.com is in ADMIN_EMAILS, so it gets the admin role
-curl -s -X POST $USERS/users/register -H 'Content-Type: application/json' \
-  -d '{"email":"admin@example.com","password":"admin123","full_name":"Shop Admin"}'
 curl -s -X POST $USERS/users/register -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"alice123","full_name":"Alice"}'
 
+# Bootstrap admin (ADMIN_EMAIL / ADMIN_PASSWORD). On k8s use the ADMIN_PASSWORD from k8s/secret.yaml.
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
 ADMIN=$(curl -s -X POST $USERS/users/login -H 'Content-Type: application/json' \
-  -d '{"email":"admin@example.com","password":"admin123"}' | jq -r .access_token)
+  -d "{\"email\":\"admin@example.com\",\"password\":\"$ADMIN_PASSWORD\"}" | jq -r .access_token)
 ALICE=$(curl -s -X POST $USERS/users/login -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"alice123"}' | jq -r .access_token)
 
@@ -270,7 +269,7 @@ curl -s $PAYMENTS/payments?order_id=$ORDER_ID -H "Authorization: Bearer $ALICE" 
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | all | Postgres connection (or set `DATABASE_URL`) |
 | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES` | all / users | JWT signing & validation |
 | `INTERNAL_API_KEY` | all | Shared key for service-to-service endpoints |
-| `ADMIN_EMAILS` | users | Comma-separated emails that register as admins |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | users | Bootstrap admin account seeded at startup |
 | `PRODUCTS_SERVICE_URL`, `PROMOTIONS_SERVICE_URL`, `PAYMENTS_SERVICE_URL` | orders | Downstream URLs |
 | `ORDERS_SERVICE_URL`, `PAYMENTS_SERVICE_URL` | support | Downstream URLs |
 | `HTTP_TIMEOUT` | orders, support | Downstream call timeout in seconds (default 5) |

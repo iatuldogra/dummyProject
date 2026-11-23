@@ -12,5 +12,5 @@ data:
   PAYMENTS_SERVICE_URL: http://payments-service
   PROMOTIONS_SERVICE_URL: http://promotions-service
   SUPPORT_SERVICE_URL: http://support-service
-  ADMIN_EMAILS: admin@example.com
+  ADMIN_EMAIL: admin@example.com
   JWT_EXPIRE_MINUTES: "60"

@@ -7,7 +7,8 @@ x-service-env: &service-env
   DB_PASSWORD: postgres
   JWT_SECRET: dev-jwt-secret
   INTERNAL_API_KEY: dev-internal-key
-  ADMIN_EMAILS: admin@example.com
+  ADMIN_EMAIL: admin@example.com
+  ADMIN_PASSWORD: admin123
   USERS_SERVICE_URL: http://users-service:8000
   PRODUCTS_SERVICE_URL: http://products-service:8000
   ORDERS_SERVICE_URL: http://orders-service:8000
